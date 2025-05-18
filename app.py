@@ -47,7 +47,7 @@ if image_data is not None:
         # 결과 출력
         cv2.putText(frame, f"Angle: {int(angle)} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
         cv2.putText(frame, feedback, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        st.image(frame, channels=\"BGR\", caption=\"분석 결과\")
+        st.image(frame, channels="BGR", caption="분석 결과")
 
     else:
-        st.warning(\"사람을 인식하지 못했습니다. 자세히 촬영해주세요.\")
+        st.warning("사람을 인식하지 못했습니다. 자세히 촬영해주세요.")
