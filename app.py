@@ -45,7 +45,7 @@ if image_data is not None:
             color = (0, 0, 255)
 
         # 결과 출력
-        cv2.putText(frame, f\"Angle: {int(angle)} deg\", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(frame, f"Angle: {int(angle)} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
         cv2.putText(frame, feedback, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
         st.image(frame, channels=\"BGR\", caption=\"분석 결과\")
 
