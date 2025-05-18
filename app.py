@@ -1,71 +1,89 @@
-import streamlit as st
 import cv2
 import numpy as np
+import streamlit as st
 import mediapipe as mp
+from PIL import Image
 
-st.title("🏐 배구 스파이크 자세 분석기 (웹캠 촬영용)")
+st.set_page_config(layout="wide")
+st.title("🏐 Volleyball Spike Analyzer (Auto Capture with Feedback)")
 
-image_data = st.camera_input("📸 아래 버튼을 눌러 자세를 촬영하세요")
+# HSV 색상 범위 슬라이더
+st.sidebar.subheader("🎨 Ball HSV Range (Pink)")
+h_min = st.sidebar.slider("H Min", 0, 179, 169)
+s_min = st.sidebar.slider("S Min", 0, 255, 101)
+v_min = st.sidebar.slider("V Min", 0, 255, 78)
+h_max = st.sidebar.slider("H Max", 0, 179, 179)
+s_max = st.sidebar.slider("S Max", 0, 255, 255)
+v_max = st.sidebar.slider("V Max", 0, 255, 255)
 
-if image_data is not None:
-    file_bytes = np.asarray(bytearray(image_data.read()), dtype=np.uint8)
-    frame = cv2.imdecode(file_bytes, 1)
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+mp_drawing = mp.solutions.drawing_utils
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-    # ✅ MediaPipe 포즈 초기화
-    mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose(static_image_mode=True, model_complexity=1)
-    results = pose.process(rgb)
+FRAME_WINDOW = st.image([])
 
-    h, w, _ = frame.shape
+def calculate_angle(a, b, c):
+    a, b, c = np.array(a), np.array(b), np.array(c)
+    radians = np.arccos(np.clip(np.dot(b-a, c-b) / 
+                                (np.linalg.norm(b-a) * np.linalg.norm(c-b)), -1.0, 1.0))
+    return np.degrees(radians)
 
-    # ✅ HSV로 공 색상 탐지 (분홍색 기준)
+cap = cv2.VideoCapture(0)
+captured = False
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        st.warning("웹캠에서 프레임을 가져올 수 없습니다.")
+        break
+
+    frame = cv2.flip(frame, 1)
+    image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = pose.process(image_rgb)
+
+    # 공 탐지 (색상 기반)
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    lower_hsv = np.array([169, 101, 78])
-    upper_hsv = np.array([179, 255, 255])
-    mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+    mask = cv2.inRange(hsv, (h_min, s_min, v_min), (h_max, s_max, v_max))
     contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
+    ball_center = None
     if contours:
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area > 200:
-                (x, y), radius = cv2.minEnclosingCircle(cnt)
-                center = (int(x), int(y))
-                cv2.circle(frame, center, int(radius), (255, 0, 255), 2)
-                cv2.putText(frame, "Ball Detected", (int(x), int(y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
-                break
+        largest = max(contours, key=cv2.contourArea)
+        ((x, y), radius) = cv2.minEnclosingCircle(largest)
+        if radius > 5:
+            ball_center = (int(x), int(y))
+            cv2.circle(frame, ball_center, int(radius), (255, 0, 255), 2)
 
-    # ✅ 포즈 분석
+    # 포즈 추정
     if results.pose_landmarks:
-        landmarks = results.pose_landmarks.landmark
+        lm = results.pose_landmarks.landmark
+        # 좌우 중 하나 기준 (여기선 오른쪽)
+        shoulder = [lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].x,
+                    lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y]
+        elbow = [lm[mp_pose.PoseLandmark.RIGHT_ELBOW.value].x,
+                 lm[mp_pose.PoseLandmark.RIGHT_ELBOW.value].y]
+        wrist = [lm[mp_pose.PoseLandmark.RIGHT_WRIST.value].x,
+                 lm[mp_pose.PoseLandmark.RIGHT_WRIST.value].y]
+        h, w, _ = frame.shape
+        points = [tuple(int(i * j) for i, j in zip(p, (w, h))) for p in [shoulder, elbow, wrist]]
+        angle = calculate_angle(*points)
+        cv2.putText(frame, f"Angle: {int(angle)} deg", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-        def get_coords(idx): return [landmarks[idx].x * w, landmarks[idx].y * h]
-        shoulder = get_coords(mp_pose.PoseLandmark.RIGHT_SHOULDER.value)
-        elbow = get_coords(mp_pose.PoseLandmark.RIGHT_ELBOW.value)
-        wrist = get_coords(mp_pose.PoseLandmark.RIGHT_WRIST.value)
+        # 손목 위치와 공 중심 간 거리 계산
+        if ball_center:
+            hand = points[2]
+            dist = np.linalg.norm(np.array(hand) - np.array(ball_center))
+            if dist < 50 and not captured:
+                cv2.putText(frame, "💥 HIT!", (ball_center[0], ball_center[1]-10),
+                            cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
+                img_result = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                st.success("🎉 공과 손이 충돌했습니다. 분석 결과 캡처됨!")
+                st.image(img_result, caption="📸 충돌 시점", use_column_width=True)
+                captured = True
+                break  # 정지
 
-        def calculate_angle(a, b, c):
-            a, b, c = np.array(a), np.array(b), np.array(c)
-            ab = a - b
-            cb = c - b
-            radians = np.arccos(np.dot(ab, cb) / (np.linalg.norm(ab) * np.linalg.norm(cb)))
-            return np.degrees(radians)
+    FRAME_WINDOW.image(frame, channels="BGR")
+else:
+    st.warning("웹캠 연결을 확인해주세요.")
 
-        angle = calculate_angle(shoulder, elbow, wrist)
-
-        # ✅ 피드백 출력
-        if angle > 150:
-            feedback = "✅ 아주 좋은 자세입니다!"
-            color = (0, 255, 0)
-        else:
-            feedback = "⚠️ 공을 칠 때 팔꿈치를 더 펴보세요."
-            color = (0, 0, 255)
-
-        cv2.putText(frame, f"Angle: {int(angle)} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        cv2.putText(frame, feedback, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-    else:
-        st.warning("사람을 인식하지 못했습니다. 자세히 촬영해주세요.")
-
-    # ✅ 최종 출력
-    st.image(frame, channels="BGR", caption="분석 결과")
+cap.release()
