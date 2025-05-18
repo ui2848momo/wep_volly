@@ -1,101 +1,95 @@
-import cv2
-import mediapipe as mp
 import streamlit as st
+import cv2
 import numpy as np
+import mediapipe as mp
+import math
 
-# MediaPipe 초기화
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-mp_drawing = mp.solutions.drawing_utils
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands()
+st.title("🏐 배구 스파이크 자세 분석기 (웹캠 촬영용)")
 
-# Streamlit 설정
-st.set_page_config(layout="wide")
-st.title("🏐 Volleyball Spike Analyzer (Webcam + Auto Stop)")
-st.sidebar.header("🎨 Ball HSV Range (Pink)")
-h_min = st.sidebar.slider("H Min", 0, 179, 169)
-s_min = st.sidebar.slider("S Min", 0, 255, 101)
-v_min = st.sidebar.slider("V Min", 0, 255, 78)
-h_max = st.sidebar.slider("H Max", 0, 179, 179)
-s_max = st.sidebar.slider("S Max", 0, 255, 255)
-v_max = st.sidebar.slider("V Max", 0, 255, 255)
+image_data = st.camera_input("📸 아래 버튼을 눌러 자세를 촬영하세요")
 
-# HSV 범위
-lower_hsv = np.array([h_min, s_min, v_min])
-upper_hsv = np.array([h_max, s_max, v_max])
+stop_frame = None
+running = True
 
-# 유틸 함수: 손가락 끝 좌표 추출
-def get_index_finger_tip(results, image_shape):
-    if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
-            h, w, _ = image_shape
-            x = int(hand_landmarks.landmark[8].x * w)
-            y = int(hand_landmarks.landmark[8].y * h)
-            return (x, y)
-    return None
-
-# 유틸 함수: 공 중심 좌표 추출
-def get_ball_center(mask):
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours:
-        largest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest) > 100:
-            M = cv2.moments(largest)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                return (cx, cy)
-    return None
-
-# 스트리밍 실행
-cap = cv2.VideoCapture(0)
-st_frame = st.empty()
-captured = False
-
-while cap.isOpened() and not captured:
-    ret, frame = cap.read()
-    if not ret:
-        st.error("❌ 웹캠에서 영상을 불러올 수 없습니다.")
-        break
-
-    # 좌우 반전 및 전처리
-    frame = cv2.flip(frame, 1)
+if image_data is not None:
+    file_bytes = np.asarray(bytearray(image_data.read()), dtype=np.uint8)
+    frame = cv2.imdecode(file_bytes, 1)
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    # 포즈/손/색상 추론
-    pose_results = pose.process(rgb)
-    hand_results = hands.process(rgb)
+    # ✅ MediaPipe 포즈 초기화
+    mp_pose = mp.solutions.pose
+    pose = mp_pose.Pose(static_image_mode=True, model_complexity=1)
+    results = pose.process(rgb)
 
-    # 공 마스크
+    h, w, _ = frame.shape
+
+    # ✅ HSV로 공 색상 탐지 (분홍색 기준)
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lower_hsv = np.array([169, 101, 78])
+    upper_hsv = np.array([179, 255, 255])
     mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 포즈 그리기
-    if pose_results.pose_landmarks:
-        mp_drawing.draw_landmarks(frame, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+    ball_detected = False
+    ball_center = None
 
-    # 손가락 위치
-    fingertip = get_index_finger_tip(hand_results, frame.shape)
-    if fingertip:
-        cv2.circle(frame, fingertip, 5, (255, 0, 255), -1)
+    if contours:
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area > 200:
+                (x, y), radius = cv2.minEnclosingCircle(cnt)
+                center = (int(x), int(y))
+                ball_center = center
+                ball_detected = True
+                cv2.circle(frame, center, int(radius), (255, 0, 255), 2)
+                cv2.putText(frame, "Ball Detected", (int(x), int(y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                break
 
-    # 공 위치
-    ball_center = get_ball_center(mask)
-    if ball_center:
-        cv2.circle(frame, ball_center, 10, (0, 255, 255), 2)
+    # ✅ 포즈 분석
+    if results.pose_landmarks:
+        landmarks = results.pose_landmarks.landmark
 
-    # 충돌 판단
-    if fingertip and ball_center:
-        distance = np.linalg.norm(np.array(fingertip) - np.array(ball_center))
-        if distance < 40:
-            cv2.putText(frame, "Hit!", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-            captured = True
-            st.success("🎉 충돌 감지! 프레임 캡처됨.")
-            st.image(frame, channels="BGR", caption="📸 충돌 순간")
-            break
+        def get_coords(idx): return [landmarks[idx].x * w, landmarks[idx].y * h]
+        shoulder = get_coords(mp_pose.PoseLandmark.RIGHT_SHOULDER.value)
+        elbow = get_coords(mp_pose.PoseLandmark.RIGHT_ELBOW.value)
+        wrist = get_coords(mp_pose.PoseLandmark.RIGHT_WRIST.value)
 
-    # 실시간 스트리밍 출력
-    st_frame.image(frame, channels="BGR")
+        def calculate_angle(a, b, c):
+            a, b, c = np.array(a), np.array(b), np.array(c)
+            ab = a - b
+            cb = c - b
+            radians = np.arccos(np.dot(ab, cb) / (np.linalg.norm(ab) * np.linalg.norm(cb)))
+            return np.degrees(radians)
 
-cap.release()
+        angle = calculate_angle(shoulder, elbow, wrist)
+
+        # ✅ 피드백 출력
+        if angle > 150:
+            feedback = "✅ 아주 좋은 자세입니다!"
+            color = (0, 255, 0)
+        else:
+            feedback = "⚠️ 공을 칠 때 팔꿈치를 더 펴보세요."
+            color = (0, 0, 255)
+
+        cv2.putText(frame, f"Angle: {int(angle)} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(frame, feedback, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        # ✅ 충돌 판단 추가
+        finger_tip = wrist
+        finger_tip_detected = True if finger_tip else False
+        distance_threshold = 40  # 충돌 임계값 (픽셀 기준)
+
+        if ball_detected and finger_tip_detected:
+            distance = math.dist(ball_center, finger_tip)
+            if distance < distance_threshold:
+                stop_frame = frame.copy()
+                running = False
+    else:
+        st.warning("사람을 인식하지 못했습니다. 자세히 촬영해주세요.")
+
+    # ✅ 결과 출력
+    if not running and stop_frame is not None:
+        st.image(stop_frame, channels="BGR", caption="충돌 시점 캡처")
+        st.success("손과 공이 접촉되었습니다!")
+    else:
+        st.image(frame, channels="BGR", caption="분석 결과")
