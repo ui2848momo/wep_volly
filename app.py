@@ -1,86 +1,71 @@
-
+import streamlit as st
 import cv2
 import numpy as np
 import mediapipe as mp
-import streamlit as st
-import math
 
-st.set_page_config(layout="wide")
-st.title("🏐 Volleyball Spike Analyzer (실시간 웹캠 + 충돌 멈춤 + 포즈 추적)")
+st.title("🏐 배구 스파이크 자세 분석기 (웹캠 촬영용)")
 
-# HSV 슬라이더 설정
-st.sidebar.header("🎨 공 색상 HSV 범위")
-h_min = st.sidebar.slider("H min", 0, 179, 169)
-s_min = st.sidebar.slider("S min", 0, 255, 101)
-v_min = st.sidebar.slider("V min", 0, 255, 78)
-h_max = st.sidebar.slider("H max", 0, 179, 179)
-s_max = st.sidebar.slider("S max", 0, 255, 255)
-v_max = st.sidebar.slider("V max", 0, 255, 255)
+image_data = st.camera_input("📸 아래 버튼을 눌러 자세를 촬영하세요")
 
-lower_hsv = np.array([h_min, s_min, v_min])
-upper_hsv = np.array([h_max, s_max, v_max])
-
-# MediaPipe 초기화
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose()
-mp_drawing = mp.solutions.drawing_utils
-
-cap = cv2.VideoCapture(0)
-stframe = st.empty()
-
-distance_threshold = 40
-stop_frame = None
-running = True
-
-while cap.isOpened() and running:
-    ret, frame = cap.read()
-    if not ret:
-        st.warning("웹캠 프레임을 불러올 수 없습니다.")
-        break
-
-    frame = cv2.flip(frame, 1)
+if image_data is not None:
+    file_bytes = np.asarray(bytearray(image_data.read()), dtype=np.uint8)
+    frame = cv2.imdecode(file_bytes, 1)
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    result = pose.process(rgb)
 
-    height, width, _ = frame.shape
-    ball_center = None
-    finger_tip = None
-    ball_detected = False
-    finger_tip_detected = False
+    # ✅ MediaPipe 포즈 초기화
+    mp_pose = mp.solutions.pose
+    pose = mp_pose.Pose(static_image_mode=True, model_complexity=1)
+    results = pose.process(rgb)
 
-    # 공 탐지
+    h, w, _ = frame.shape
+
+    # ✅ HSV로 공 색상 탐지 (분홍색 기준)
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lower_hsv = np.array([169, 101, 78])
+    upper_hsv = np.array([179, 255, 255])
     mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
     if contours:
-        largest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest) > 300:
-            (x, y), radius = cv2.minEnclosingCircle(largest)
-            ball_center = (int(x), int(y))
-            ball_detected = True
-            cv2.circle(frame, ball_center, int(radius), (255, 0, 255), 2)
-            cv2.putText(frame, "Ball", (int(x), int(y)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area > 200:
+                (x, y), radius = cv2.minEnclosingCircle(cnt)
+                center = (int(x), int(y))
+                cv2.circle(frame, center, int(radius), (255, 0, 255), 2)
+                cv2.putText(frame, "Ball Detected", (int(x), int(y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                break
 
-    # 포즈 추정 + 손가락 위치
-    if result.pose_landmarks:
-        mp_drawing.draw_landmarks(frame, result.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-        lm = result.pose_landmarks.landmark
-        index = lm[mp_pose.PoseLandmark.RIGHT_INDEX]
-        finger_tip = (int(index.x * width), int(index.y * height))
-        finger_tip_detected = True
-        cv2.circle(frame, finger_tip, 6, (0, 255, 0), -1)
+    # ✅ 포즈 분석
+    if results.pose_landmarks:
+        landmarks = results.pose_landmarks.landmark
 
-    # 충돌 판단
-    if ball_detected and finger_tip_detected:
-        distance = math.dist(ball_center, finger_tip)
-        if distance < distance_threshold:
-            stop_frame = frame.copy()
-            running = False
+        def get_coords(idx): return [landmarks[idx].x * w, landmarks[idx].y * h]
+        shoulder = get_coords(mp_pose.PoseLandmark.RIGHT_SHOULDER.value)
+        elbow = get_coords(mp_pose.PoseLandmark.RIGHT_ELBOW.value)
+        wrist = get_coords(mp_pose.PoseLandmark.RIGHT_WRIST.value)
 
-    stframe.image(frame, channels="BGR", use_column_width=True)
+        def calculate_angle(a, b, c):
+            a, b, c = np.array(a), np.array(b), np.array(c)
+            ab = a - b
+            cb = c - b
+            radians = np.arccos(np.dot(ab, cb) / (np.linalg.norm(ab) * np.linalg.norm(cb)))
+            return np.degrees(radians)
 
-cap.release()
-if stop_frame is not None:
-    st.image(stop_frame, channels="BGR", caption="📸 충돌 시점 캡처", use_column_width=True)
-    st.success("손과 공이 충돌하여 영상이 자동으로 멈췄습니다!")
+        angle = calculate_angle(shoulder, elbow, wrist)
+
+        # ✅ 피드백 출력
+        if angle > 150:
+            feedback = "✅ 아주 좋은 자세입니다!"
+            color = (0, 255, 0)
+        else:
+            feedback = "⚠️ 공을 칠 때 팔꿈치를 더 펴보세요."
+            color = (0, 0, 255)
+
+        cv2.putText(frame, f"Angle: {int(angle)} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(frame, feedback, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+    else:
+        st.warning("사람을 인식하지 못했습니다. 자세히 촬영해주세요.")
+
+    # ✅ 최종 출력
+    st.image(frame, channels="BGR", caption="분석 결과")
